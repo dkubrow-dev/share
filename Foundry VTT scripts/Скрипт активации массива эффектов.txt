@@ -1,0 +1,175 @@
+/**
+ * Midi-QOL ItemMacro (On Use)
+ * Включает первый выключенный эффект "Жажда крови. День N",
+ * затем одним сообщением выводит ОПИСАНИЯ всех АКТИВНЫХ эффектов этого шаблона.
+ *
+ * Видимость сообщения учитывает rollMode:
+ * - "Публичный бросок" (roll) -> всем
+ * - "Приватный бросок" (gmroll) и "Слепой бросок" (blindroll) -> себе + ГМу
+ * - "Для себя" (selfroll) -> только себе
+ *
+ * Не использует ChatMessage.getSpeaker (чтобы не ловить warning про mergeObject).
+ */
+(async () => {
+  const throwNotified = (msg) => {
+    ui.notifications.error(msg);
+    const err = new Error(msg);
+    err._alreadyNotified = true;
+    throw err;
+  };
+
+  const getEfName = (ef) => ef?.name ?? ef?.label ?? "Без названия";
+
+  const getEffectDescription = (ef) => {
+    return (
+      ef?.description ??
+      ef?.system?.description?.value ??
+      ef?.system?.description ??
+      ef?.flags?.dnd5e?.description ??
+      ef?.flags?.dnd5e?.effectDescription ??
+      ef?.flags?.dae?.description ??
+      ""
+    );
+  };
+
+  const fallbackFromChanges = (ef) => {
+    const changes = ef?.changes ?? [];
+    if (!Array.isArray(changes) || changes.length === 0) return `<em>Описание отсутствует.</em>`;
+    const rows = changes
+      .map((c) => `<li><code>${c.key ?? "?"}</code>: ${c.value ?? ""}</li>`)
+      .join("");
+    return `<ul>${rows}</ul>`;
+  };
+
+  const buildSpeaker = (actor, tokenDoc, alias) => {
+    const s = {
+      actor: actor?.id ?? null,
+      alias: alias ?? actor?.name ?? "Способность",
+    };
+    if (tokenDoc) {
+      s.token = tokenDoc.id;
+      s.scene = tokenDoc.parent?.id ?? canvas.scene?.id ?? null;
+    }
+    return s;
+  };
+
+  // rollMode -> whisper list (null = всем)
+  const getWhisperByRollMode = (rollMode) => {
+    const selfId = game.user?.id;
+    const gmIds = game.users?.filter((u) => u.isGM)?.map((u) => u.id) ?? [];
+
+    const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
+
+    switch (rollMode) {
+      case "gmroll":     // приватный
+      case "blindroll":  // слепой
+        return uniq([selfId, ...gmIds]); // себе + ГМу
+      case "selfroll":   // для себя
+        return uniq([selfId]);          // только себе
+      case "roll":       // публичный
+      default:
+        return null;                    // всем
+    }
+  };
+
+  try {
+    const lastArg = args?.[args.length - 1] ?? {};
+    const workflow = lastArg?.workflow ?? MidiQOL?.Workflow?.getWorkflow?.(lastArg?.uuid);
+
+    const actor =
+      workflow?.actor ??
+      (lastArg?.actorUuid ? await fromUuid(lastArg.actorUuid) : null) ??
+      (lastArg?.actorId ? game.actors.get(lastArg.actorId) : null);
+
+    if (!actor) throwNotified("Жажда крови: не удалось определить актёра (actor) для макроса.");
+
+    const tokenDoc =
+      workflow?.token?.document ??
+      (lastArg?.tokenUuid ? await fromUuid(lastArg.tokenUuid) : null) ??
+      (lastArg?.tokenId ? canvas.tokens.get(lastArg.tokenId)?.document : null);
+
+    const item =
+      workflow?.item ??
+      (lastArg?.itemUuid ? await fromUuid(lastArg.itemUuid) : null) ??
+      (lastArg?.itemId ? actor.items.get(lastArg.itemId) : null);
+
+    const abilityName = item?.name ?? lastArg?.item?.name ?? "Способность";
+
+    // rollMode: пробуем взять из workflow, иначе из core настроек
+    const rollMode =
+      workflow?.rollOptions?.rollMode ??
+      workflow?.rollMode ??
+      game.settings.get("core", "rollMode") ??
+      "roll";
+
+    const whisper = getWhisperByRollMode(rollMode);
+
+    const re = /^Жажда крови\.\s*День\s+(\d+)$/u;
+
+    // 1) Собираем эффекты по шаблону
+    const matched = [];
+    for (const ef of actor.effects) {
+      const name = getEfName(ef);
+      const m = name.match(re);
+      if (!m) continue;
+
+      const n = Number(m[1]);
+      if (!Number.isInteger(n) || n <= 0) continue;
+
+      matched.push({ n, ef });
+    }
+
+    if (matched.length === 0) {
+      throwNotified(`Жажда крови: у актёра "${actor.name}" не найдено эффектов вида "Жажда крови. День N".`);
+    }
+
+    matched.sort((a, b) => a.n - b.n);
+
+    // 2) Включаем первый выключенный
+    const target = matched.find((x) => x.ef.disabled === true);
+    if (target) await target.ef.update({ disabled: false });
+
+    // 3) Список активных
+    const active = [];
+    for (const ef of actor.effects) {
+      const name = getEfName(ef);
+      const m = name.match(re);
+      if (!m) continue;
+
+      const n = Number(m[1]);
+      if (!Number.isInteger(n) || n <= 0) continue;
+
+      if (ef.disabled === false) active.push({ n, ef });
+    }
+    active.sort((a, b) => a.n - b.n);
+
+    // 4) Контент
+    let content = "";
+    if (active.length === 0) {
+      content = `<div class="blood-hunger-effects"><em>Активных эффектов “Жажда крови” сейчас нет.</em></div>`;
+    } else {
+      const blocks = active.map(({ ef }) => {
+        const title = getEfName(ef);
+        let desc = getEffectDescription(ef);
+        if (!desc || (typeof desc === "string" && desc.trim() === "")) desc = fallbackFromChanges(ef);
+
+        return `<div style="margin: 1.5em 0 .6em 0;">
+          <b>${title}</b>
+          <div>${desc}</div>
+        </div>`;
+      });
+
+      content = `<div style="margin: 0 0 1em 0;">Наступает новый день. Елизавета ощущает, как её жажда крови усиливается.</div><div class="blood-hunger-effects">${blocks.join("")}</div>`;
+    }
+
+    const speaker = buildSpeaker(actor, tokenDoc, abilityName);
+
+    const msgData = { speaker, content };
+    if (whisper) msgData.whisper = whisper;
+
+    await ChatMessage.create(msgData);
+  } catch (err) {
+    console.error("ItemMacro | Жажда крови:", err);
+    if (!err?._alreadyNotified) ui.notifications.error(err?.message ?? String(err));
+  }
+})();

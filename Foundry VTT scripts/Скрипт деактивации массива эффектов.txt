@@ -1,0 +1,124 @@
+/**
+ * Midi-QOL ItemMacro (On Use) — ОБРАТНЫЙ
+ * Отключает ВСЕ активные эффекты "Жажда крови. День N" (ставит disabled: true).
+ * Если не найдено ни одного эффекта по шаблону — красная ошибка.
+ *
+ * Видимость сообщения учитывает rollMode:
+ * - roll      -> всем
+ * - gmroll/blindroll -> себе + ГМу
+ * - selfroll  -> только себе
+ *
+ * Не использует ChatMessage.getSpeaker (чтобы не ловить warning про mergeObject).
+ */
+(async () => {
+  const throwNotified = (msg) => {
+    ui.notifications.error(msg);
+    const err = new Error(msg);
+    err._alreadyNotified = true;
+    throw err;
+  };
+
+  const getEfName = (ef) => ef?.name ?? ef?.label ?? "Без названия";
+
+  const buildSpeaker = (actor, tokenDoc, alias) => {
+    const s = { actor: actor?.id ?? null, alias: alias ?? actor?.name ?? "Способность" };
+    if (tokenDoc) {
+      s.token = tokenDoc.id;
+      s.scene = tokenDoc.parent?.id ?? canvas.scene?.id ?? null;
+    }
+    return s;
+  };
+
+  const getWhisperByRollMode = (rollMode) => {
+    const selfId = game.user?.id;
+    const gmIds = game.users?.filter((u) => u.isGM)?.map((u) => u.id) ?? [];
+    const uniq = (arr) => Array.from(new Set(arr.filter(Boolean)));
+
+    switch (rollMode) {
+      case "gmroll":
+      case "blindroll":
+        return uniq([selfId, ...gmIds]);
+      case "selfroll":
+        return uniq([selfId]);
+      case "roll":
+      default:
+        return null; // всем
+    }
+  };
+
+  try {
+    const lastArg = args?.[args.length - 1] ?? {};
+    const workflow = lastArg?.workflow ?? MidiQOL?.Workflow?.getWorkflow?.(lastArg?.uuid);
+
+    const actor =
+      workflow?.actor ??
+      (lastArg?.actorUuid ? await fromUuid(lastArg.actorUuid) : null) ??
+      (lastArg?.actorId ? game.actors.get(lastArg.actorId) : null);
+
+    if (!actor) throwNotified("Жажда крови (сброс): не удалось определить актёра (actor) для макроса.");
+
+    const tokenDoc =
+      workflow?.token?.document ??
+      (lastArg?.tokenUuid ? await fromUuid(lastArg.tokenUuid) : null) ??
+      (lastArg?.tokenId ? canvas.tokens.get(lastArg.tokenId)?.document : null);
+
+    const item =
+      workflow?.item ??
+      (lastArg?.itemUuid ? await fromUuid(lastArg.itemUuid) : null) ??
+      (lastArg?.itemId ? actor.items.get(lastArg.itemId) : null);
+
+    const abilityName = item?.name ?? lastArg?.item?.name ?? "Способность";
+
+    const rollMode =
+      workflow?.rollOptions?.rollMode ??
+      workflow?.rollMode ??
+      game.settings.get("core", "rollMode") ??
+      "roll";
+
+    const whisper = getWhisperByRollMode(rollMode);
+
+    const re = /^Жажда крови\.\s*День\s+(\d+)$/u;
+
+    // Найти все эффекты по шаблону
+    const matched = [];
+    for (const ef of actor.effects) {
+      const m = getEfName(ef).match(re);
+      if (!m) continue;
+
+      const n = Number(m[1]);
+      if (!Number.isInteger(n) || n <= 0) continue;
+
+      matched.push({ n, ef });
+    }
+
+    if (matched.length === 0) {
+      throwNotified(`Жажда крови (сброс): у актёра "${actor.name}" не найдено эффектов вида "Жажда крови. День N".`);
+    }
+
+    // Отключить ВСЕ активные (disabled === false)
+    const toDisable = matched.filter((x) => x.ef.disabled === false);
+
+    if (toDisable.length > 0) {
+      // быстрее и чище пачкой
+      await actor.updateEmbeddedDocuments(
+        "ActiveEffect",
+        toDisable.map(({ ef }) => ({ _id: ef.id, disabled: true }))
+      );
+    }
+
+    // Сообщение в чат (опционально, но обычно полезно)
+    const speaker = buildSpeaker(actor, tokenDoc, abilityName);
+    const content =
+      toDisable.length > 0
+        ? `Жажда крови утолена. Елизавете удалось продержаться без крови ${toDisable.length} дн.`
+        : `Жажда крови уже утолена. Прошло меньше дня. Держи себя в руках, Лиза!`;
+
+    const msgData = { speaker, content };
+    if (whisper) msgData.whisper = whisper;
+
+    await ChatMessage.create(msgData);
+  } catch (err) {
+    console.error("ItemMacro | Жажда крови (сброс):", err);
+    if (!err?._alreadyNotified) ui.notifications.error(err?.message ?? String(err));
+  }
+})();

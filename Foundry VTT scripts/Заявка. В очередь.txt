@@ -1,0 +1,22 @@
+(async () => {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const text = '<h1 style="text-align: center;"><span style="font-size:24px;"><span style="color:#000000;">Жду очереди</span></span></h1><img src="icons/skills/social/wave-halt-stop.webp" width="350">';
+
+  // 1) Сначала создаём сообщение и ждём завершения
+  await ChatMessage.create({
+    user: game.user._id,
+    speaker: ChatMessage.getSpeaker({ token: actor }),
+    content: text
+  });
+
+  // 2) Потом проигрываем 3 раза с паузой 0.5с
+  const sound = {
+    src: 'https://raw.githubusercontent.com/laaruk/journal/main/bell.ogg',
+    volume: 1,
+    autoplay: true,
+    loop: false
+  };
+
+  await foundry.audio.AudioHelper.play(sound, true);
+})();
